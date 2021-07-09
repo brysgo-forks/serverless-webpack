@@ -1,5 +1,44 @@
 # Change Log
 
+* 5.5.1
+  * chore: use processedOptions ([#834][] @CorentinDoue)
+  * Reduce memory usage by releasing webpack stats objects after compile ([#858][] @janicduplessis)
+  * (fix) allow boolean or number values in slsw.lib.options ([#857][] @coyoteecd)
+  * Fix packaging for non-node functions ([#876][] @FatalTouch)
+
+[#834]: https://github.com/serverless-heaven/serverless-webpack/pull/834
+[#858]: https://github.com/serverless-heaven/serverless-webpack/pull/858
+[#876]: https://github.com/serverless-heaven/serverless-webpack/pull/876
+[#857]: https://github.com/serverless-heaven/serverless-webpack/pull/857
+
+* 5.5.0
+  * Add ability to specify the node_modules relative dir ([#689][] @ypxing)
+  * Fix the spawn E2BIG error when zipping ([#813][] @j0k3r)
+  * Extends the --no-build option to serverless offline start ([#770][] @nponeccop)
+  * Add Serverless Container Support ([#723][] @rogersgt)
+  * Add support for Yarn network-concurrency option ([#550][] @cfroese)
+
+[#689]: https://github.com/serverless-heaven/serverless-webpack/pull/689
+[#813]: https://github.com/serverless-heaven/serverless-webpack/pull/813
+[#770]: https://github.com/serverless-heaven/serverless-webpack/pull/770
+[#723]: https://github.com/serverless-heaven/serverless-webpack/pull/723
+[#550]: https://github.com/serverless-heaven/serverless-webpack/pull/550
+
+* 5.4.2
+  * Regression Fix: Empty lines while stats: 'errors-only' ([#773][] @Enase)
+  * Add type to CLI options ([#774][] @j0k3r)
+  * Add Serverless v2 compatibility ([#775][] @nponeccop)
+  * Support local errors with NPM 7 workspaces ([#782][] @mikejpeters)
+  * Fix `excludeRegex` option and allow dotfiles to be packaged ([#780][] @l1b3r)
+  * Correctly handle packaging for function during `deploy -f` ([#794][] @pgrzesik)
+
+[#773]: https://github.com/serverless-heaven/serverless-webpack/pull/773
+[#774]: https://github.com/serverless-heaven/serverless-webpack/pull/774
+[#775]: https://github.com/serverless-heaven/serverless-webpack/pull/775
+[#782]: https://github.com/serverless-heaven/serverless-webpack/pull/782
+[#780]: https://github.com/serverless-heaven/serverless-webpack/pull/780
+[#794]: https://github.com/serverless-heaven/serverless-webpack/pull/794
+
 * 5.4.1
   * Display the zip method used ([#735][] @j0k3r)
   * Dependabot should now updates package.json too ([#742][] @j0k3r)

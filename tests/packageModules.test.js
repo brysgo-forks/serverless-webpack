@@ -94,7 +94,7 @@ describe('packageModules', () => {
       module.compileStats = { stats: [] };
       return expect(module.packageModules()).to.be.fulfilled.then(() =>
         BbPromise.all([
-          expect(bestzipMock.bestzip).to.not.have.been.called,
+          expect(bestzipMock.nativeZip).to.not.have.been.called,
           expect(writeFileDirStub).to.not.have.been.called,
           expect(fsMock.createWriteStream).to.not.have.been.called,
           expect(globMock.sync).to.not.have.been.called
@@ -106,7 +106,7 @@ describe('packageModules', () => {
       module.skipCompile = true;
       return expect(module.packageModules()).to.be.fulfilled.then(() =>
         BbPromise.all([
-          expect(bestzipMock.bestzip).to.not.have.been.called,
+          expect(bestzipMock.nativeZip).to.not.have.been.called,
           expect(writeFileDirStub).to.not.have.been.called,
           expect(fsMock.createWriteStream).to.not.have.been.called,
           expect(globMock.sync).to.not.have.been.called
@@ -126,11 +126,7 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
@@ -184,11 +180,7 @@ describe('packageModules', () => {
           const stats = {
             stats: [
               {
-                compilation: {
-                  compiler: {
-                    outputPath: '/my/Service/Path/.webpack/service'
-                  }
-                }
+                outputPath: '/my/Service/Path/.webpack/service'
               }
             ]
           };
@@ -225,11 +217,7 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
@@ -273,11 +261,7 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
@@ -312,7 +296,7 @@ describe('packageModules', () => {
       it('should reject if no files are found because all files are excluded using regex', () => {
         module.configuration = new Configuration({
           webpack: {
-            excludeRegex: /.*/
+            excludeRegex: '.*'
           }
         });
 
@@ -320,11 +304,7 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
@@ -355,6 +335,50 @@ describe('packageModules', () => {
         module.compileStats = stats;
         return expect(module.packageModules()).to.be.rejectedWith('Packaging: No files found');
       });
+
+      it('should reject only .md files without verbose log', () => {
+        module.options.verbose = false;
+        module.configuration = new Configuration({
+          webpack: {
+            excludeRegex: '.md$'
+          }
+        });
+
+        // Test data
+        const stats = {
+          stats: [
+            {
+              outputPath: '/my/Service/Path/.webpack/service'
+            }
+          ]
+        };
+        const files = [ 'README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map' ];
+        const allFunctions = [ 'func1', 'func2' ];
+        const func1 = {
+          handler: 'src/handler1',
+          events: []
+        };
+        const func2 = {
+          handler: 'src/handler2',
+          events: []
+        };
+        // Serverless behavior
+        getVersionStub.returns('1.18.0');
+        getServiceObjectStub.returns({
+          name: 'test-service'
+        });
+        getAllFunctionsStub.returns(allFunctions);
+        getFunctionStub.withArgs('func1').returns(func1);
+        getFunctionStub.withArgs('func2').returns(func2);
+        // Mock behavior
+        globMock.sync.returns(files);
+        fsMock._streamMock.on.withArgs('open').yields();
+        fsMock._streamMock.on.withArgs('close').yields();
+        fsMock._statMock.isDirectory.returns(false);
+
+        module.compileStats = stats;
+        return expect(module.packageModules()).to.be.fulfilled;
+      });
     });
 
     describe('with individual packaging', () => {
@@ -362,18 +386,10 @@ describe('packageModules', () => {
       const stats = {
         stats: [
           {
-            compilation: {
-              compiler: {
-                outputPath: '/my/Service/Path/.webpack/func1'
-              }
-            }
+            outputPath: '/my/Service/Path/.webpack/func1'
           },
           {
-            compilation: {
-              compiler: {
-                outputPath: '/my/Service/Path/.webpack/func2'
-              }
-            }
+            outputPath: '/my/Service/Path/.webpack/func2'
           }
         ]
       };
@@ -429,14 +445,21 @@ describe('packageModules', () => {
   });
 
   describe('copyExistingArtifacts()', () => {
-    const allFunctions = [ 'func1', 'func2' ];
+    const allFunctions = [ 'func1', 'func2', 'funcPython' ];
     const func1 = {
       handler: 'src/handler1',
       events: []
     };
     const func2 = {
       handler: 'src/handler2',
-      events: []
+      events: [],
+      runtime: 'node14'
+    };
+
+    const funcPython = {
+      handler: 'src/handlerPython',
+      events: [],
+      runtime: 'python3.7'
     };
 
     const entryFunctions = [
@@ -449,6 +472,11 @@ describe('packageModules', () => {
         handlerFile: 'src/handler2.js',
         funcName: 'func2',
         func: func2
+      },
+      {
+        handlerFile: 'src/handlerPython.js',
+        funcName: 'funcPython',
+        func: funcPython
       }
     ];
 
@@ -467,6 +495,7 @@ describe('packageModules', () => {
         getAllFunctionsStub.returns(allFunctions);
         getFunctionStub.withArgs('func1').returns(func1);
         getFunctionStub.withArgs('func2').returns(func2);
+        getFunctionStub.withArgs('funcPython').returns(funcPython);
       });
 
       it('copies the artifact', () => {
@@ -491,11 +520,7 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
@@ -612,9 +637,10 @@ describe('packageModules', () => {
         getAllFunctionsStub.returns(allFunctions);
         getFunctionStub.withArgs('func1').returns(func1);
         getFunctionStub.withArgs('func2').returns(func2);
+        getFunctionStub.withArgs('funcPython').returns(funcPython);
       });
 
-      it('copies each artifact', () => {
+      it('copies each node artifact', () => {
         const expectedFunc1Destination = path.join('.serverless', 'func1.zip');
         const expectedFunc2Destination = path.join('.serverless', 'func2.zip');
 
@@ -628,6 +654,22 @@ describe('packageModules', () => {
             // Should set package artifact locations
             expect(func1).to.have.a.nested.property('package.artifact').that.equals(expectedFunc1Destination),
             expect(func2).to.have.a.nested.property('package.artifact').that.equals(expectedFunc2Destination)
+          ])
+        );
+      });
+
+      it('copies only the artifact for function specified in options', () => {
+        _.set(module, 'options.function', 'func1');
+        const expectedFunc1Destination = path.join('.serverless', 'func1.zip');
+
+        return expect(module.copyExistingArtifacts()).to.be.fulfilled.then(() =>
+          BbPromise.all([
+            // Should copy an artifact per function into .serverless
+            expect(fsMock.copyFileSync).callCount(1),
+            expect(fsMock.copyFileSync).to.be.calledWith(path.join('.webpack', 'func1.zip'), expectedFunc1Destination),
+
+            // Should set package artifact locations
+            expect(func1).to.have.a.nested.property('package.artifact').that.equals(expectedFunc1Destination)
           ])
         );
       });

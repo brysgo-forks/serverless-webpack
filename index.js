@@ -90,6 +90,12 @@ class ServerlessWebpack {
     };
 
     this.hooks = {
+      initialize: () => {
+        // serverless.processedInput does not exist in serverless@<2.0.0. This ensure the retrocompatibility with serverless v1
+        if (this.serverless.processedInput && this.serverless.processedInput.options) {
+          this.options = this.serverless.processedInput.options;
+        }
+      },
       'before:package:createDeploymentArtifacts': () =>
         BbPromise.bind(this)
           .then(() => this.serverless.pluginManager.spawn('webpack:validate'))
@@ -163,17 +169,25 @@ class ServerlessWebpack {
         BbPromise.bind(this)
           .tap(() => {
             lib.webpack.isLocal = true;
+            // --no-build override
+            if (this.options.build === false) {
+              this.skipCompile = true;
+            }
           })
           .then(this.prepareOfflineInvoke)
-          .then(this.wpwatch),
+          .then(() => (this.skipCompile ? BbPromise.resolve() : this.wpwatch())),
 
       'before:offline:start:init': () =>
         BbPromise.bind(this)
           .tap(() => {
             lib.webpack.isLocal = true;
+            // --no-build override
+            if (this.options.build === false) {
+              this.skipCompile = true;
+            }
           })
           .then(this.prepareOfflineInvoke)
-          .then(this.wpwatch),
+          .then(() => (this.skipCompile ? BbPromise.resolve() : this.wpwatch())),
 
       'before:step-functions-offline:start': () =>
         BbPromise.bind(this)
