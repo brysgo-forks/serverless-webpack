@@ -1,34 +1,19 @@
-'use strict';
-
-const BbPromise = require('bluebird');
 const _ = require('lodash');
-const chai = require('chai');
-const path = require('path');
-const sinon = require('sinon');
-const mockery = require('mockery');
+const path = require('node:path');
 const Serverless = require('serverless');
 const Configuration = require('../lib/Configuration');
+const fsMock = require('node:fs');
+const tinyglobbyMock = require('tinyglobby');
+const baseModule = require('../lib/packageModules');
 
-// Mocks
-const fsMockFactory = require('./mocks/fs.mock');
-const globMockFactory = require('./mocks/glob.mock');
-const bestzipMockFactory = require('./mocks/bestzip.mock');
-
-chai.use(require('chai-as-promised'));
-chai.use(require('sinon-chai'));
-
-const expect = chai.expect;
+jest.mock('fs');
+jest.mock('tinyglobby');
+jest.mock('archiver');
 
 describe('packageModules', () => {
-  let sandbox;
-  let baseModule;
   let serverless;
   let module;
 
-  // Mocks
-  let fsMock;
-  let globMock;
-  let bestzipMock;
   // Serverless stubs
   let writeFileDirStub;
   let getAllFunctionsStub;
@@ -36,39 +21,23 @@ describe('packageModules', () => {
   let getServiceObjectStub;
   let getVersionStub;
 
-  before(() => {
-    sandbox = sinon.createSandbox();
-    sandbox.usingPromise(BbPromise);
-
-    fsMock = fsMockFactory.create(sandbox);
-    bestzipMock = bestzipMockFactory.create(sandbox);
-    globMock = globMockFactory.create(sandbox);
-
-    mockery.enable({ warnOnUnregistered: false });
-    mockery.registerMock('bestzip', bestzipMock);
-    mockery.registerMock('fs', fsMock);
-    mockery.registerMock('glob', globMock);
-    baseModule = require('../lib/packageModules');
-    Object.freeze(baseModule);
-  });
-
-  after(() => {
-    mockery.disable();
-    mockery.deregisterAll();
-  });
-
   beforeEach(() => {
-    serverless = new Serverless();
+    serverless = new Serverless({ commands: ['print'], options: {}, serviceDir: null });
     serverless.cli = {
-      log: sandbox.stub(),
-      consoleLog: sandbox.stub()
+      log: jest.fn(),
+      consoleLog: jest.fn()
     };
 
-    writeFileDirStub = sandbox.stub(serverless.utils, 'writeFileDir');
-    getAllFunctionsStub = sandbox.stub(serverless.service, 'getAllFunctions');
-    getFunctionStub = sandbox.stub(serverless.service, 'getFunction');
-    getServiceObjectStub = sandbox.stub(serverless.service, 'getServiceObject');
-    getVersionStub = sandbox.stub(serverless, 'getVersion');
+    writeFileDirStub = jest.fn();
+    serverless.utils.writeFileDir = writeFileDirStub;
+    getAllFunctionsStub = jest.fn();
+    serverless.service.getAllFunctions = getAllFunctionsStub;
+    getFunctionStub = jest.fn();
+    serverless.service.getFunction = getFunctionStub;
+    getServiceObjectStub = jest.fn();
+    serverless.service.getServiceObject = getServiceObjectStub;
+    getVersionStub = jest.fn();
+    serverless.getVersion = getVersionStub;
 
     module = _.assign(
       {
@@ -83,35 +52,31 @@ describe('packageModules', () => {
     );
   });
 
-  afterEach(() => {
-    // Reset all counters and restore all stubbed functions
-    sandbox.reset();
-    sandbox.restore();
-  });
-
   describe('packageModules()', () => {
     it('should do nothing if no compile stats are available', () => {
       module.compileStats = { stats: [] };
-      return expect(module.packageModules()).to.be.fulfilled.then(() =>
-        BbPromise.all([
-          expect(bestzipMock.bestzip).to.not.have.been.called,
-          expect(writeFileDirStub).to.not.have.been.called,
-          expect(fsMock.createWriteStream).to.not.have.been.called,
-          expect(globMock.sync).to.not.have.been.called
-        ])
-      );
+      return expect(module.packageModules())
+        .resolves.toEqual([])
+        .then(() =>
+          Promise.all([
+            expect(writeFileDirStub).toHaveBeenCalledTimes(0),
+            expect(fsMock.createWriteStream).toHaveBeenCalledTimes(0),
+            expect(tinyglobbyMock.globSync).toHaveBeenCalledTimes(0)
+          ])
+        );
     });
 
     it('should do nothing if skipCompile is true', () => {
       module.skipCompile = true;
-      return expect(module.packageModules()).to.be.fulfilled.then(() =>
-        BbPromise.all([
-          expect(bestzipMock.bestzip).to.not.have.been.called,
-          expect(writeFileDirStub).to.not.have.been.called,
-          expect(fsMock.createWriteStream).to.not.have.been.called,
-          expect(globMock.sync).to.not.have.been.called
-        ])
-      );
+      return expect(module.packageModules())
+        .resolves.toBeUndefined()
+        .then(() =>
+          Promise.all([
+            expect(writeFileDirStub).toHaveBeenCalledTimes(0),
+            expect(fsMock.createWriteStream).toHaveBeenCalledTimes(0),
+            expect(tinyglobbyMock.globSync).toHaveBeenCalledTimes(0)
+          ])
+        );
     });
 
     describe('with service packaging', () => {
@@ -126,16 +91,12 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
-        const files = [ 'README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map' ];
-        const allFunctions = [ 'func1', 'func2' ];
+        const files = ['README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map'];
+        const allFunctions = ['func1', 'func2'];
         const func1 = {
           handler: 'src/handler1',
           events: []
@@ -145,21 +106,31 @@ describe('packageModules', () => {
           events: []
         };
         // Serverless behavior
-        getVersionStub.returns('1.18.0');
-        getServiceObjectStub.returns({
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
         // Mock behavior
-        globMock.sync.returns(files);
-        fsMock._streamMock.on.withArgs('open').yields();
-        fsMock._streamMock.on.withArgs('close').yields();
-        fsMock._statMock.isDirectory.returns(false);
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
 
         module.compileStats = stats;
-        return expect(module.packageModules()).to.be.fulfilled.then(() => BbPromise.all([]));
+        return expect(module.packageModules())
+          .resolves.toEqual([path.join('.webpack', 'test-service.zip')])
+          .then(() => Promise.resolve());
       });
 
       describe('with the Google provider', () => {
@@ -184,16 +155,12 @@ describe('packageModules', () => {
           const stats = {
             stats: [
               {
-                compilation: {
-                  compiler: {
-                    outputPath: '/my/Service/Path/.webpack/service'
-                  }
-                }
+                outputPath: '/my/Service/Path/.webpack/service'
               }
             ]
           };
-          const files = [ 'README.md', 'index.js' ];
-          const allFunctions = [ 'func1', 'func2' ];
+          const files = ['README.md', 'index.js'];
+          const allFunctions = ['func1', 'func2'];
           const func1 = {
             handler: 'handler1',
             events: []
@@ -202,21 +169,29 @@ describe('packageModules', () => {
             handler: 'handler2',
             events: []
           };
-          getVersionStub.returns('1.18.0');
-          getServiceObjectStub.returns({
+          getVersionStub.mockReturnValue('1.18.0');
+          getServiceObjectStub.mockReturnValue({
             name: 'test-service'
           });
-          getAllFunctionsStub.returns(allFunctions);
-          getFunctionStub.withArgs('func1').returns(func1);
-          getFunctionStub.withArgs('func2').returns(func2);
+          getAllFunctionsStub.mockReturnValue(allFunctions);
+          getFunctionStub.mockImplementation(name => {
+            if (name === 'func1') {
+              return func1;
+            } else if (name === 'func2') {
+              return func2;
+            }
+          });
           // Mock behavior
-          globMock.sync.returns(files);
-          fsMock._streamMock.on.withArgs('open').yields();
-          fsMock._streamMock.on.withArgs('close').yields();
-          fsMock._statMock.isDirectory.returns(false);
+          tinyglobbyMock.globSync.mockReturnValue(files);
+          fsMock._streamMock.on.mockImplementation((evt, cb) => {
+            if (evt === 'open' || evt === 'close') {
+              cb();
+            }
+          });
+          fsMock._statMock.isDirectory.mockReturnValue(false);
 
           module.compileStats = stats;
-          return expect(module.packageModules()).to.be.fulfilled;
+          return expect(module.packageModules()).resolves.toEqual([path.join('.webpack', 'test-service.zip')]);
         });
       });
 
@@ -225,16 +200,12 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
-        const files = [ 'README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map' ];
-        const allFunctions = [ 'func1', 'func2' ];
+        const files = ['README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map'];
+        const allFunctions = ['func1', 'func2'];
         const func1 = {
           handler: 'src/handler1',
           events: []
@@ -244,28 +215,38 @@ describe('packageModules', () => {
           events: []
         };
         // Serverless behavior
-        getServiceObjectStub.returns({
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
         // Mock behavior
-        globMock.sync.returns(files);
-        fsMock._streamMock.on.withArgs('open').yields();
-        fsMock._streamMock.on.withArgs('close').yields();
-        fsMock._statMock.isDirectory.returns(false);
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
 
         module.compileStats = stats;
-        return BbPromise.each([ '1.18.1', '2.17.0', '10.15.3' ], version => {
-          getVersionStub.returns(version);
-          return expect(module.packageModules()).to.be.fulfilled.then(() => BbPromise.all([]));
-        }).then(() =>
-          BbPromise.each([ '1.17.0', '1.16.0-alpha', '1.15.3' ], version => {
-            getVersionStub.returns(version);
-            return expect(module.packageModules()).to.be.fulfilled.then(() => BbPromise.all([]));
-          })
-        );
+        return (async () => {
+          for (const version of ['1.18.1', '2.17.0', '10.15.3']) {
+            getVersionStub.mockReturnValue(version);
+            await expect(module.packageModules()).resolves.toEqual([path.join('.webpack', 'test-service.zip')]);
+          }
+
+          for (const version of ['1.17.0', '1.16.0-alpha', '1.15.3']) {
+            getVersionStub.mockReturnValue(version);
+            await expect(module.packageModules()).resolves.toEqual([path.join('.webpack', 'test-service.zip')]);
+          }
+        })();
       });
 
       it('should reject if no files are found', () => {
@@ -273,16 +254,12 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
         const files = [];
-        const allFunctions = [ 'func1', 'func2' ];
+        const allFunctions = ['func1', 'func2'];
         const func1 = {
           handler: 'src/handler1',
           events: []
@@ -292,27 +269,35 @@ describe('packageModules', () => {
           events: []
         };
         // Serverless behavior
-        getVersionStub.returns('1.18.0');
-        getServiceObjectStub.returns({
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
         // Mock behavior
-        globMock.sync.returns(files);
-        fsMock._streamMock.on.withArgs('open').yields();
-        fsMock._streamMock.on.withArgs('close').yields();
-        fsMock._statMock.isDirectory.returns(false);
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
 
         module.compileStats = stats;
-        return expect(module.packageModules()).to.be.rejectedWith('Packaging: No files found');
+        return expect(module.packageModules()).rejects.toThrow('Packaging: No files found');
       });
 
       it('should reject if no files are found because all files are excluded using regex', () => {
         module.configuration = new Configuration({
           webpack: {
-            excludeRegex: /.*/
+            excludeRegex: '.*'
           }
         });
 
@@ -320,16 +305,12 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
-        const files = [ 'README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map' ];
-        const allFunctions = [ 'func1', 'func2' ];
+        const files = ['README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map'];
+        const allFunctions = ['func1', 'func2'];
         const func1 = {
           handler: 'src/handler1',
           events: []
@@ -339,21 +320,81 @@ describe('packageModules', () => {
           events: []
         };
         // Serverless behavior
-        getVersionStub.returns('1.18.0');
-        getServiceObjectStub.returns({
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
         // Mock behavior
-        globMock.sync.returns(files);
-        fsMock._streamMock.on.withArgs('open').yields();
-        fsMock._streamMock.on.withArgs('close').yields();
-        fsMock._statMock.isDirectory.returns(false);
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
 
         module.compileStats = stats;
-        return expect(module.packageModules()).to.be.rejectedWith('Packaging: No files found');
+        return expect(module.packageModules()).rejects.toThrow('Packaging: No files found');
+      });
+
+      it('should reject only .md files without verbose log', () => {
+        module.options.verbose = false;
+        module.configuration = new Configuration({
+          webpack: {
+            excludeRegex: '.md$'
+          }
+        });
+
+        // Test data
+        const stats = {
+          stats: [
+            {
+              outputPath: '/my/Service/Path/.webpack/service'
+            }
+          ]
+        };
+        const files = ['README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map'];
+        const allFunctions = ['func1', 'func2'];
+        const func1 = {
+          handler: 'src/handler1',
+          events: []
+        };
+        const func2 = {
+          handler: 'src/handler2',
+          events: []
+        };
+        // Serverless behavior
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
+          name: 'test-service'
+        });
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
+        // Mock behavior
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
+
+        module.compileStats = stats;
+        return expect(module.packageModules()).resolves.toEqual([path.join('.webpack', 'test-service.zip')]);
       });
     });
 
@@ -362,23 +403,15 @@ describe('packageModules', () => {
       const stats = {
         stats: [
           {
-            compilation: {
-              compiler: {
-                outputPath: '/my/Service/Path/.webpack/func1'
-              }
-            }
+            outputPath: '/my/Service/Path/.webpack/func1'
           },
           {
-            compilation: {
-              compiler: {
-                outputPath: '/my/Service/Path/.webpack/func2'
-              }
-            }
+            outputPath: '/my/Service/Path/.webpack/func2'
           }
         ]
       };
-      const files = [ 'README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map' ];
-      const allFunctions = [ 'func1', 'func2' ];
+      const files = ['README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map'];
+      const allFunctions = ['func1', 'func2'];
       const func1 = {
         handler: 'src/handler1',
         events: []
@@ -408,35 +441,53 @@ describe('packageModules', () => {
 
       it('should package', () => {
         // Serverless behavior
-        getVersionStub.returns('1.18.0');
-        getServiceObjectStub.returns({
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
         // Mock behavior
-        globMock.sync.returns(files);
-        fsMock._streamMock.on.withArgs('open').yields();
-        fsMock._streamMock.on.withArgs('close').yields();
-        fsMock._statMock.isDirectory.returns(false);
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
 
         module.compileStats = stats;
 
-        return expect(module.packageModules()).to.be.fulfilled;
+        return expect(module.packageModules()).resolves.toEqual([
+          path.join('.webpack', 'func1.zip'),
+          path.join('.webpack', 'func2.zip')
+        ]);
       });
     });
   });
 
   describe('copyExistingArtifacts()', () => {
-    const allFunctions = [ 'func1', 'func2' ];
+    const allFunctions = ['func1', 'func2', 'funcPython'];
     const func1 = {
       handler: 'src/handler1',
       events: []
     };
     const func2 = {
       handler: 'src/handler2',
-      events: []
+      events: [],
+      runtime: 'node14'
+    };
+
+    const funcPython = {
+      handler: 'src/handlerPython',
+      events: [],
+      runtime: 'python3.7'
     };
 
     const entryFunctions = [
@@ -449,41 +500,51 @@ describe('packageModules', () => {
         handlerFile: 'src/handler2.js',
         funcName: 'func2',
         func: func2
+      },
+      {
+        handlerFile: 'src/handlerPython.js',
+        funcName: 'funcPython',
+        func: funcPython
       }
     ];
 
     describe('with service packaging', () => {
-      afterEach(() => {
-        fsMock.copyFileSync.resetHistory();
-      });
-
       beforeEach(() => {
         _.set(module, 'entryFunctions', entryFunctions);
         _.set(serverless.service.package, 'individually', false);
-        getVersionStub.returns('1.18.0');
-        getServiceObjectStub.returns({
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          } else if (name === 'funcPython') {
+            return funcPython;
+          }
+        });
       });
 
       it('copies the artifact', () => {
         const expectedArtifactSource = path.join('.webpack', 'test-service.zip');
         const expectedArtifactDestination = path.join('.serverless', 'test-service.zip');
 
-        return expect(module.copyExistingArtifacts()).to.be.fulfilled.then(() =>
-          BbPromise.all([
-            // Should copy the artifact into .serverless
-            expect(fsMock.copyFileSync).callCount(1),
-            expect(fsMock.copyFileSync).to.be.calledWith(expectedArtifactSource, expectedArtifactDestination),
+        return expect(module.copyExistingArtifacts())
+          .resolves.toBeUndefined()
+          .then(() =>
+            Promise.all([
+              // Should copy the artifact into .serverless
+              expect(fsMock.copyFileSync).toHaveBeenCalledTimes(1),
+              expect(fsMock.copyFileSync).toHaveBeenCalledWith(expectedArtifactSource, expectedArtifactDestination),
 
-            // Should set package artifact for each function to the single artifact
-            expect(func1).to.have.a.nested.property('package.artifact').that.equals(expectedArtifactDestination),
-            expect(func2).to.have.a.nested.property('package.artifact').that.equals(expectedArtifactDestination)
-          ])
-        );
+              // Should set package artifact for each function to the single artifact
+              expect(func1).toHaveProperty('package.artifact', expectedArtifactDestination),
+              expect(func2).toHaveProperty('package.artifact', expectedArtifactDestination)
+            ])
+          );
       });
 
       it('should set the function artifact depending on the serverless version', () => {
@@ -491,16 +552,12 @@ describe('packageModules', () => {
         const stats = {
           stats: [
             {
-              compilation: {
-                compiler: {
-                  outputPath: '/my/Service/Path/.webpack/service'
-                }
-              }
+              outputPath: '/my/Service/Path/.webpack/service'
             }
           ]
         };
-        const files = [ 'README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map' ];
-        const allFunctions = [ 'func1', 'func2' ];
+        const files = ['README.md', 'src/handler1.js', 'src/handler1.js.map', 'src/handler2.js', 'src/handler2.js.map'];
+        const allFunctions = ['func1', 'func2'];
         const func1 = {
           handler: 'src/handler1',
           events: []
@@ -510,42 +567,46 @@ describe('packageModules', () => {
           events: []
         };
         // Serverless behavior
-        getServiceObjectStub.returns({
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          }
+        });
         // Mock behavior
-        globMock.sync.returns(files);
-        fsMock._streamMock.on.withArgs('open').yields();
-        fsMock._streamMock.on.withArgs('close').yields();
-        fsMock._statMock.isDirectory.returns(false);
+        tinyglobbyMock.globSync.mockReturnValue(files);
+        fsMock._streamMock.on.mockImplementation((evt, cb) => {
+          if (evt === 'open' || evt === 'close') {
+            cb();
+          }
+        });
+        fsMock._statMock.isDirectory.mockReturnValue(false);
 
         const expectedArtifactPath = path.join('.serverless', 'test-service.zip');
 
         module.compileStats = stats;
-        return BbPromise.each([ '1.18.1', '2.17.0', '10.15.3' ], version => {
-          getVersionStub.returns(version);
-          return expect(module.copyExistingArtifacts()).to.be.fulfilled.then(() =>
-            BbPromise.all([
-              expect(func1).to.have.a.nested.property('package.artifact').that.equals(expectedArtifactPath),
-              expect(func2).to.have.a.nested.property('package.artifact').that.equals(expectedArtifactPath)
-            ])
-          );
-        }).then(() =>
-          BbPromise.each([ '1.17.0', '1.16.0-alpha', '1.15.3' ], version => {
-            getVersionStub.returns(version);
-            return expect(module.copyExistingArtifacts()).to.be.fulfilled.then(() =>
-              BbPromise.all([
-                expect(func1).to.have.a.nested.property('artifact').that.equals(expectedArtifactPath),
-                expect(func2).to.have.a.nested.property('artifact').that.equals(expectedArtifactPath),
-                expect(func1).to.have.a.nested.property('package.disable').that.is.true,
-                expect(func2).to.have.a.nested.property('package.disable').that.is.true
-              ])
-            );
-          })
-        );
+        return (async () => {
+          for (const version of ['1.18.1', '2.17.0', '10.15.3']) {
+            getVersionStub.mockReturnValue(version);
+            await expect(module.copyExistingArtifacts()).resolves.toBeUndefined();
+            expect(func1).toHaveProperty('package.artifact', expectedArtifactPath);
+            expect(func2).toHaveProperty('package.artifact', expectedArtifactPath);
+          }
+
+          for (const version of ['1.17.0', '1.16.0-alpha', '1.15.3']) {
+            getVersionStub.mockReturnValue(version);
+            await expect(module.copyExistingArtifacts()).resolves.toBeUndefined();
+            expect(func1).toHaveProperty('artifact', expectedArtifactPath);
+            expect(func2).toHaveProperty('artifact', expectedArtifactPath);
+            expect(func1).toHaveProperty('package.disable', true);
+            expect(func2).toHaveProperty('package.disable', true);
+          }
+        })();
       });
 
       describe('with the Google provider', () => {
@@ -567,7 +628,7 @@ describe('packageModules', () => {
 
         it('should set the service artifact path', () => {
           // Test data
-          const allFunctions = [ 'func1', 'func2' ];
+          const allFunctions = ['func1', 'func2'];
           const func1 = {
             handler: 'handler1',
             events: []
@@ -576,13 +637,18 @@ describe('packageModules', () => {
             handler: 'handler2',
             events: []
           };
-          getVersionStub.returns('1.18.0');
-          getServiceObjectStub.returns({
+          getVersionStub.mockReturnValue('1.18.0');
+          getServiceObjectStub.mockReturnValue({
             name: 'test-service'
           });
-          getAllFunctionsStub.returns(allFunctions);
-          getFunctionStub.withArgs('func1').returns(func1);
-          getFunctionStub.withArgs('func2').returns(func2);
+          getAllFunctionsStub.mockReturnValue(allFunctions);
+          getFunctionStub.mockImplementation(name => {
+            if (name === 'func1') {
+              return func1;
+            } else if (name === 'func2') {
+              return func2;
+            }
+          });
           // Mock behavior
           // fsMock._streamMock.on.withArgs('open').yields();
           // fsMock._streamMock.on.withArgs('close').yields();
@@ -590,46 +656,78 @@ describe('packageModules', () => {
 
           const expectedArtifactPath = path.join('.serverless', 'test-service.zip');
 
-          return expect(module.copyExistingArtifacts()).to.be.fulfilled.then(() =>
-            expect(serverless.service).to.have.a.nested.property('package.artifact').that.equals(expectedArtifactPath)
-          );
+          return expect(module.copyExistingArtifacts())
+            .resolves.toBeUndefined()
+            .then(() => expect(serverless.service).toHaveProperty('package.artifact', expectedArtifactPath));
         });
       });
     });
 
     describe('with individual packaging', () => {
-      afterEach(() => {
-        fsMock.copyFileSync.resetHistory();
-      });
-
       beforeEach(() => {
         _.set(module, 'entryFunctions', entryFunctions);
         _.set(serverless.service.package, 'individually', true);
-        getVersionStub.returns('1.18.0');
-        getServiceObjectStub.returns({
+        getVersionStub.mockReturnValue('1.18.0');
+        getServiceObjectStub.mockReturnValue({
           name: 'test-service'
         });
-        getAllFunctionsStub.returns(allFunctions);
-        getFunctionStub.withArgs('func1').returns(func1);
-        getFunctionStub.withArgs('func2').returns(func2);
+        getAllFunctionsStub.mockReturnValue(allFunctions);
+        getFunctionStub.mockImplementation(name => {
+          if (name === 'func1') {
+            return func1;
+          } else if (name === 'func2') {
+            return func2;
+          } else if (name === 'funcPython') {
+            return funcPython;
+          }
+        });
       });
 
-      it('copies each artifact', () => {
+      it('copies each node artifact', () => {
         const expectedFunc1Destination = path.join('.serverless', 'func1.zip');
         const expectedFunc2Destination = path.join('.serverless', 'func2.zip');
 
-        return expect(module.copyExistingArtifacts()).to.be.fulfilled.then(() =>
-          BbPromise.all([
-            // Should copy an artifact per function into .serverless
-            expect(fsMock.copyFileSync).callCount(2),
-            expect(fsMock.copyFileSync).to.be.calledWith(path.join('.webpack', 'func1.zip'), expectedFunc1Destination),
-            expect(fsMock.copyFileSync).to.be.calledWith(path.join('.webpack', 'func2.zip'), expectedFunc2Destination),
+        return expect(module.copyExistingArtifacts())
+          .resolves.toBeUndefined()
+          .then(() =>
+            Promise.all([
+              // Should copy an artifact per function into .serverless
+              expect(fsMock.copyFileSync).toHaveBeenCalledTimes(2),
+              expect(fsMock.copyFileSync).toHaveBeenCalledWith(
+                path.join('.webpack', 'func1.zip'),
+                expectedFunc1Destination
+              ),
+              expect(fsMock.copyFileSync).toHaveBeenCalledWith(
+                path.join('.webpack', 'func2.zip'),
+                expectedFunc2Destination
+              ),
 
-            // Should set package artifact locations
-            expect(func1).to.have.a.nested.property('package.artifact').that.equals(expectedFunc1Destination),
-            expect(func2).to.have.a.nested.property('package.artifact').that.equals(expectedFunc2Destination)
-          ])
-        );
+              // Should set package artifact locations
+              expect(func1).toHaveProperty('package.artifact', expectedFunc1Destination),
+              expect(func2).toHaveProperty('package.artifact', expectedFunc2Destination)
+            ])
+          );
+      });
+
+      it('copies only the artifact for function specified in options', () => {
+        _.set(module, 'options.function', 'func1');
+        const expectedFunc1Destination = path.join('.serverless', 'func1.zip');
+
+        return expect(module.copyExistingArtifacts())
+          .resolves.toBeUndefined()
+          .then(() =>
+            Promise.all([
+              // Should copy an artifact per function into .serverless
+              expect(fsMock.copyFileSync).toHaveBeenCalledTimes(1),
+              expect(fsMock.copyFileSync).toHaveBeenCalledWith(
+                path.join('.webpack', 'func1.zip'),
+                expectedFunc1Destination
+              ),
+
+              // Should set package artifact locations
+              expect(func1).toHaveProperty('package.artifact', expectedFunc1Destination)
+            ])
+          );
       });
     });
   });

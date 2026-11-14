@@ -3,12 +3,31 @@ updates:
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
       time: "02:00"
       timezone: Europe/Paris
     open-pull-requests-limit: 10
     versioning-strategy: increase
+    cooldown:
+      default-days: 7
+    exclude-paths:
+      - "examples/**"
+      - "tests/**"
+    groups:
+      babel-dependencies:
+        patterns:
+          - "*babel*"
     ignore:
-      - dependency-name: husky
+      # because tests aren't compatible
+      - dependency-name: serverless
         versions:
-          - ">= 5.0.0"
+          - ">= 4.0.0"
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      time: "02:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7

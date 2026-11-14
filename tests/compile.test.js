@@ -1,47 +1,19 @@
-'use strict';
-
-const BbPromise = require('bluebird');
 const _ = require('lodash');
-const chai = require('chai');
-const sinon = require('sinon');
-const mockery = require('mockery');
 const Serverless = require('serverless');
-const makeWebpackMock = require('./webpack.mock');
+const webpackMock = require('webpack');
+const baseModule = require('../lib/compile');
 
-chai.use(require('chai-as-promised'));
-chai.use(require('sinon-chai'));
-
-const expect = chai.expect;
+jest.mock('webpack');
 
 describe('compile', () => {
-  let sandbox;
-  let webpackMock;
-  let baseModule;
   let serverless;
   let module;
 
-  before(() => {
-    sandbox = sinon.createSandbox();
-    sandbox.usingPromise(BbPromise);
-
-    webpackMock = makeWebpackMock(sandbox);
-
-    mockery.enable({ warnOnUnregistered: false });
-    mockery.registerMock('webpack', webpackMock);
-    baseModule = require('../lib/compile');
-    Object.freeze(baseModule);
-  });
-
-  after(() => {
-    mockery.disable();
-    mockery.deregisterAll();
-  });
-
   beforeEach(() => {
-    serverless = new Serverless();
+    serverless = new Serverless({ commands: ['print'], options: {}, serviceDir: null });
     serverless.cli = {
-      log: sandbox.stub(),
-      consoleLog: sandbox.stub()
+      log: jest.fn(),
+      consoleLog: jest.fn()
     };
 
     module = _.assign(
@@ -53,39 +25,48 @@ describe('compile', () => {
     );
   });
 
-  afterEach(() => {
-    // This will reset the webpackMock too
-    sandbox.restore();
-  });
-
   it('should expose a `compile` method', () => {
-    expect(module.compile).to.be.a('function');
+    expect(module.compile).toEqual(expect.any(Function));
   });
 
   it('should compile with webpack from a context configuration', () => {
     const testWebpackConfig = 'testconfig';
     module.webpackConfig = testWebpackConfig;
     module.configuration = { concurrency: 1 };
-    return expect(module.compile()).to.be.fulfilled.then(() => {
-      expect(webpackMock).to.have.been.calledWith(testWebpackConfig);
-      expect(webpackMock.compilerMock.run).to.have.been.calledOnce;
-      return null;
-    });
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(webpackMock).toHaveBeenCalledWith(testWebpackConfig);
+        expect(webpackMock.compilerMock.run).toHaveBeenCalledTimes(1);
+        return null;
+      });
   });
 
   it('should fail if configuration is missing', () => {
+    delete module.webpackConfig;
+    return expect(module.compile()).rejects.toThrow('Unable to find Webpack configuration');
+  });
+
+  it('should fail if plugin configuration is missing', () => {
     const testWebpackConfig = 'testconfig';
     module.webpackConfig = testWebpackConfig;
     module.configuration = undefined;
-    return expect(module.compile()).to.be.rejectedWith('Missing plugin configuration');
+    return expect(module.compile()).rejects.toThrow('Missing plugin configuration');
   });
 
   it('should fail if there are compilation errors', () => {
     module.webpackConfig = 'testconfig';
     module.configuration = { concurrency: 1 };
-    // We stub errors here. It will be reset again in afterEach()
-    sandbox.stub(webpackMock.statsMock.compilation, 'errors').value(['error']);
-    return expect(module.compile()).to.be.rejectedWith(/compilation error/);
+    webpackMock.statsMock.compilation.errors = ['error'];
+    expect.assertions(1);
+    return expect(module.compile()).rejects.toThrow(/compilation error/);
+  });
+
+  it('should fail if webpack run returns an error', () => {
+    module.webpackConfig = 'testconfig';
+    module.configuration = { concurrency: 1 };
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(new Error('Webpack exploded')));
+    return expect(module.compile()).rejects.toThrow('Webpack exploded');
   });
 
   it('should work with multi compile', () => {
@@ -97,26 +78,38 @@ describe('compile', () => {
             errors: [],
             compiler: {
               outputPath: 'statsMock-outputPath'
-            }
+            },
+            modules: []
           },
-          toString: sandbox.stub().returns('testStats'),
+          toString: jest.fn().mockReturnValue('testStats'),
           hasErrors: _.constant(false)
         }
       ]
     };
     module.webpackConfig = testWebpackConfig;
     module.configuration = { concurrency: 1 };
-    webpackMock.compilerMock.run.reset();
-    webpackMock.compilerMock.run.yields(null, multiStats);
-    return expect(module.compile()).to.be.fulfilled.then(() => {
-      expect(webpackMock).to.have.been.calledWith(testWebpackConfig);
-      expect(webpackMock.compilerMock.run).to.have.been.calledOnce;
-      return null;
-    });
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(webpackMock).toHaveBeenCalledWith(testWebpackConfig);
+        expect(webpackMock.compilerMock.run).toHaveBeenCalledTimes(1);
+        return null;
+      });
   });
 
-  it('should work with concurrent compile', () => {
-    const testWebpackConfig = [ 'testconfig', 'testconfig2' ];
+  it('should work with individual compile and webpack filesystem cache', () => {
+    const testWebpackConfig = {
+      cache: {
+        type: 'filesystem'
+      },
+      // Below entry is inserted during validate() which happens before compile()
+      // Thus the assumed value
+      entry: {
+        'function-name/handler': './function-name/handler.js'
+      }
+    };
     const multiStats = {
       stats: [
         {
@@ -124,23 +117,229 @@ describe('compile', () => {
             errors: [],
             compiler: {
               outputPath: 'statsMock-outputPath'
-            }
+            },
+            modules: []
           },
-          toString: sandbox.stub().returns('testStats'),
+          toString: jest.fn().mockReturnValue('testStats'),
+          hasErrors: _.constant(false)
+        }
+      ]
+    };
+    module.webpackConfig = testWebpackConfig;
+    module.configuration = { concurrency: 1 };
+    module.serverless.service.package = {
+      individually: true
+    };
+    module.entryFunctions = [
+      {
+        handlerFile: 'function-name/handler',
+        funcName: 'function-name',
+        func: {
+          handler: 'function-name/handler.handler',
+          name: 'service-stage-function-name'
+        },
+        entry: {
+          key: 'function-name/handler',
+          value: './function-name/handler.js'
+        }
+      }
+    ];
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(webpackMock).toHaveBeenCalledWith({
+          cache: {
+            type: 'filesystem',
+            name: 'service-stage-function-name'
+          },
+          entry: {
+            'function-name/handler': './function-name/handler.js'
+          }
+        });
+        expect(webpackMock.compilerMock.run).toHaveBeenCalledTimes(1);
+        return null;
+      });
+  });
+
+  it('should work with concurrent compile', () => {
+    const testWebpackConfig = ['testconfig', 'testconfig2'];
+    const multiStats = {
+      stats: [
+        {
+          compilation: {
+            errors: [],
+            compiler: {
+              outputPath: 'statsMock-outputPath'
+            },
+            modules: []
+          },
+          toString: jest.fn().mockReturnValue('testStats'),
           hasErrors: _.constant(false)
         }
       ]
     };
     module.webpackConfig = testWebpackConfig;
     module.configuration = { concurrency: 2 };
-    webpackMock.compilerMock.run.reset();
-    webpackMock.compilerMock.run.yields(null, multiStats);
-    return expect(module.compile()).to.be.fulfilled.then(() => {
-      expect(webpackMock).to.have.been.calledWith(testWebpackConfig[0]);
-      expect(webpackMock).to.have.been.calledWith(testWebpackConfig[1]);
-      expect(webpackMock.compilerMock.run).to.have.been.calledTwice;
-      return null;
-    });
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(webpackMock).toHaveBeenCalledWith(testWebpackConfig[0]);
+        expect(webpackMock).toHaveBeenCalledWith(testWebpackConfig[1]);
+        expect(webpackMock.compilerMock.run).toHaveBeenCalledTimes(2);
+        return null;
+      });
+  });
+
+  it('should aggregate concurrent webpack errors without logger', () => {
+    module.webpackConfig = ['testconfig', 'testconfig2'];
+    module.configuration = { concurrency: 2 };
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(new Error('Webpack exploded')));
+    return expect(module.compile()).rejects.toThrow('Webpack compilation errors, see stats above');
+  });
+
+  it('should aggregate concurrent webpack errors with logger output', () => {
+    const log = jest.fn();
+    log.verbose = jest.fn();
+    const progress = {
+      update: jest.fn(),
+      remove: jest.fn()
+    };
+
+    module.log = log;
+    module.progress = {
+      get: jest.fn().mockReturnValue(progress)
+    };
+    module.webpackConfig = [
+      {
+        cache: {
+          type: 'filesystem'
+        },
+        entry: {
+          'function-name/handler': './function-name/handler.js'
+        }
+      }
+    ];
+    module.configuration = { concurrency: 1 };
+    module.serverless.service.package = {
+      individually: true
+    };
+    module.entryFunctions = [
+      {
+        handlerFile: 'function-name/handler',
+        funcName: 'function-name',
+        func: {
+          handler: 'function-name/handler.handler',
+          name: 'service-stage-function-name'
+        },
+        entry: {
+          key: 'function-name/handler',
+          value: './function-name/handler.js'
+        }
+      }
+    ];
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(new Error('Webpack exploded')));
+    return expect(module.compile()).rejects.toThrow(/Webpack compilation failed:\n\nWebpack exploded/);
+  });
+
+  it('should concurrently work with individual compile and webpack filesystem cache', () => {
+    const testWebpackConfig = [
+      {
+        cache: {
+          type: 'filesystem'
+        },
+        // Below entry is inserted during validate() which happens before compile()
+        // Thus the assumed value
+        entry: {
+          'function-name-1/handler': './function-name-1/handler.js'
+        }
+      },
+      {
+        cache: {
+          type: 'filesystem'
+        },
+        // Below entry is inserted during validate() which happens before compile()
+        // Thus the assumed value
+        entry: {
+          'function-name-2/handler': './function-name-2/handler.js'
+        }
+      }
+    ];
+    const multiStats = {
+      stats: [
+        {
+          compilation: {
+            errors: [],
+            compiler: {
+              outputPath: 'statsMock-outputPath'
+            },
+            modules: []
+          },
+          toString: jest.fn().mockReturnValue('testStats'),
+          hasErrors: _.constant(false)
+        }
+      ]
+    };
+    module.webpackConfig = testWebpackConfig;
+    module.configuration = { concurrency: 2 };
+    module.serverless.service.package = {
+      individually: true
+    };
+    module.entryFunctions = [
+      {
+        handlerFile: 'function-name-1/handler',
+        funcName: 'function-name-1',
+        func: {
+          handler: 'function-name-1/handler.handler',
+          name: 'service-stage-function-name-1'
+        },
+        entry: {
+          key: 'function-name-1/handler',
+          value: './function-name-1/handler.js'
+        }
+      },
+      {
+        handlerFile: 'function-name-2/handler',
+        funcName: 'function-name-2',
+        func: {
+          handler: 'function-name-2/handler.handler',
+          name: 'service-stage-function-name-2'
+        },
+        entry: {
+          key: 'function-name-2/handler',
+          value: './function-name-2/handler.js'
+        }
+      }
+    ];
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(webpackMock).toHaveBeenCalledWith({
+          cache: {
+            type: 'filesystem',
+            name: 'service-stage-function-name-1'
+          },
+          entry: {
+            'function-name-1/handler': './function-name-1/handler.js'
+          }
+        });
+        expect(webpackMock).toHaveBeenCalledWith({
+          cache: {
+            type: 'filesystem',
+            name: 'service-stage-function-name-2'
+          },
+          entry: {
+            'function-name-2/handler': './function-name-2/handler.js'
+          }
+        });
+        expect(webpackMock.compilerMock.run).toHaveBeenCalledTimes(2);
+        return null;
+      });
   });
 
   it('should use correct stats option', () => {
@@ -152,27 +351,138 @@ describe('compile', () => {
         errors: [],
         compiler: {
           outputPath: 'statsMock-outputPath'
-        }
+        },
+        modules: []
       },
-      toString: sandbox.stub().returns('testStats'),
+      toString: jest.fn().mockReturnValue('testStats'),
       hasErrors: _.constant(false)
     };
 
     module.webpackConfig = testWebpackConfig;
     module.configuration = { concurrency: 1 };
-    webpackMock.compilerMock.run.reset();
-    webpackMock.compilerMock.run.yields(null, mockStats);
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, mockStats));
     return expect(module.compile())
-      .to.be.fulfilled.then(() => {
-        expect(webpackMock).to.have.been.calledWith(testWebpackConfig);
-        expect(mockStats.toString.firstCall.args).to.eql([testWebpackConfig.stats]);
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(webpackMock).toHaveBeenCalledWith(testWebpackConfig);
+        expect(mockStats.toString.mock.calls).toEqual([[testWebpackConfig.stats]]);
         module.webpackConfig = [testWebpackConfig];
-        return expect(module.compile()).to.be.fulfilled;
+        return expect(module.compile()).resolves.toBeUndefined();
       })
       .then(() => {
-        expect(webpackMock).to.have.been.calledWith(testWebpackConfig);
-        expect(mockStats.toString.args).to.eql([ [testWebpackConfig.stats], [testWebpackConfig.stats] ]);
+        expect(webpackMock).toHaveBeenCalledWith(testWebpackConfig);
+        expect(mockStats.toString.mock.calls).toEqual([[testWebpackConfig.stats], [testWebpackConfig.stats]]);
         return null;
       });
+  });
+
+  it('should set stats outputPath', () => {
+    const testWebpackConfig = 'testconfig';
+    const multiStats = {
+      stats: [
+        {
+          compilation: {
+            errors: [],
+            compiler: {
+              outputPath: 'compileStats-outputPath'
+            },
+            modules: []
+          },
+          toString: jest.fn().mockReturnValue('testStats'),
+          hasErrors: _.constant(false)
+        }
+      ]
+    };
+    module.webpackConfig = testWebpackConfig;
+    module.configuration = { concurrency: 1 };
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(module.compileStats.stats[0].outputPath).toEqual('compileStats-outputPath');
+        return null;
+      });
+  });
+
+  it('should set stats externals', () => {
+    const testWebpackConfig = 'testconfig';
+    const multiStats = {
+      stats: [
+        {
+          compilation: {
+            errors: [],
+            compiler: {
+              outputPath: 'compileStats-outputPath'
+            },
+            modules: [
+              { identifier: _.constant('"crypto"'), usedExports: new Set(['randomBytes']) },
+              { identifier: _.constant('"uuid/v4"'), usedExports: true },
+              { identifier: _.constant('"mockery"'), usedExports: false },
+              { identifier: _.constant('"@scoped/vendor/module1"'), usedExports: true },
+              { identifier: _.constant('external "@scoped/vendor/module2"'), usedExports: true },
+              { identifier: _.constant('external "uuid/v4"'), usedExports: true },
+              { identifier: _.constant('external "localmodule"'), usedExports: true },
+              { identifier: _.constant('external "bluebird"'), usedExports: false },
+              { identifier: _.constant('external "aws-sdk"'), usedExports: new Set(['method']) },
+              { identifier: _.constant('external node-commonjs "lodash"'), usedExports: new Set(['method']) },
+              { identifier: _.constant('external commonjs-module "globby"'), usedExports: false },
+              { identifier: _.constant('external this "glob"'), usedExports: true },
+              { identifier: _.constant('external module "semver"'), usedExports: true },
+              { identifier: _.constant('external assign "whatever"'), usedExports: true },
+              { identifier: _.constant('external umd2 "hiyou"'), usedExports: true }
+            ]
+          },
+          toString: jest.fn().mockReturnValue('testStats'),
+          hasErrors: _.constant(false)
+        }
+      ]
+    };
+    module.webpackConfig = testWebpackConfig;
+    module.configuration = { concurrency: 1 };
+    webpackMock.compilerMock.run.mockClear();
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile())
+      .resolves.toBeUndefined()
+      .then(() => {
+        expect(module.compileStats.stats[0].externalModules).toEqual([
+          { external: '@scoped/vendor', origin: undefined },
+          { external: 'uuid', origin: undefined },
+          { external: 'localmodule', origin: undefined },
+          { external: 'aws-sdk', origin: undefined },
+          { external: 'lodash', origin: undefined },
+          { external: 'glob', origin: undefined },
+          { external: 'semver', origin: undefined },
+          { external: 'whatever', origin: undefined },
+          { external: 'hiyou', origin: undefined }
+        ]);
+        return null;
+      });
+  });
+
+  it('should fail to set stats externals', () => {
+    const testWebpackConfig = 'testconfig';
+    const multiStats = {
+      stats: [
+        {
+          compilation: {
+            errors: [],
+            compiler: {
+              outputPath: 'compileStats-outputPath'
+            },
+            modules: [{ identifier: _.constant('external node-commonjs "aws-sdk".') }]
+          },
+          toString: jest.fn().mockReturnValue('testStats'),
+          hasErrors: _.constant(false)
+        }
+      ]
+    };
+    module.webpackConfig = testWebpackConfig;
+    module.configuration = { concurrency: 1 };
+    webpackMock.compilerMock.run.mockImplementation(cb => cb(null, multiStats));
+    return expect(module.compile()).rejects.toThrow(
+      'Unable to extract module name from Webpack identifier: external node-commonjs "aws-sdk".'
+    );
   });
 });

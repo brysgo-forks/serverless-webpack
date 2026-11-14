@@ -1,0 +1,293 @@
+/**
+ * Unit tests for Configuration.
+ */
+
+const _ = require('lodash');
+const childProcess = require('node:child_process');
+const Utils = require('../lib/utils');
+
+jest.mock('child_process');
+
+describe('Utils', () => {
+  describe('guid', () => {
+    it('should return different unique ids', () => {
+      const guids = [];
+      for (let i = 0; i < 10; i++) {
+        guids.push(Utils.guid());
+      }
+
+      expect(_.size(_.uniq(guids))).toEqual(10);
+      expect(_.size(_.compact(guids))).toEqual(10);
+    });
+  });
+
+  describe('SpawnError', () => {
+    it('should store stdout and stderr', () => {
+      const err = new Utils.SpawnError('message', 'stdout', 'stderr');
+      expect(err).toHaveProperty('message', 'message\nstdout:\nstdout\nstderr:\nstderr');
+      expect(err).toHaveProperty('stdout', 'stdout');
+      expect(err).toHaveProperty('stderr', 'stderr');
+    });
+
+    it('should include cwd, stdout and stderr in toString()', () => {
+      const err = new Utils.SpawnError('message', 'stdout', 'stderr', { cwd: 'cwd' });
+
+      expect(err.toString()).toEqual('message\ncwd: cwd\nstdout:\nstdout\nstderr:\nstderr');
+    });
+
+    it('should truncate stdout and stderr in message only', () => {
+      const stdout = 'o'.repeat(8001);
+      const stderr = 'e'.repeat(8001);
+      const err = new Utils.SpawnError('message', stdout, stderr);
+
+      expect(err.message).toContain('stdout:\n');
+      expect(err.message).toContain('stderr:\n');
+      expect(err.message).toContain('... output truncated (1 more character)');
+      expect(err.stdout).toEqual(stdout);
+      expect(err.stderr).toEqual(stderr);
+    });
+  });
+
+  describe('spawnProcess', () => {
+    const childMock = {
+      stdout: {
+        setEncoding: jest.fn(),
+        on: jest.fn()
+      },
+      stderr: {
+        setEncoding: jest.fn(),
+        on: jest.fn()
+      },
+      on: jest.fn()
+    };
+
+    beforeEach(() => {
+      childProcess.spawn.mockReturnValue(childMock);
+    });
+
+    it('should call child_process.spawn', () => {
+      childMock.on.mockReset();
+      childMock.on.mockImplementation((name, cb) => {
+        if (name === 'close') {
+          cb(0);
+        }
+      });
+      return expect(Utils.spawnProcess('cmd', []))
+        .resolves.toEqual({ stderr: '', stdout: '' })
+        .then(() => {
+          expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+          return null;
+        });
+    });
+
+    it('should return stdout and stderr', () => {
+      childMock.stderr.on.mockImplementation((name, cb) => {
+        if (name === 'data') {
+          cb('myErrData');
+        }
+      });
+      childMock.stdout.on.mockImplementation((name, cb) => {
+        if (name === 'data') {
+          cb('myOutData');
+        }
+      });
+      childMock.on.mockReset();
+      childMock.on.mockImplementation((name, cb) => {
+        if (name === 'close') {
+          cb(0);
+        }
+      });
+      return expect(Utils.spawnProcess('cmd', [])).resolves.toEqual({ stderr: 'myErrData', stdout: 'myOutData' });
+    });
+
+    it('should reject on spawn internal error', () => {
+      childMock.on.mockReset();
+      childMock.on.mockImplementation((name, cb) => {
+        if (name === 'error') {
+          const err = new Error('spawn ENOENT');
+          err.code = 'ENOENT';
+          cb(err);
+        }
+      });
+      return expect(Utils.spawnProcess('cmd', [])).rejects.toThrow(
+        'cmd failed to start. Command "cmd" was not found. Make sure it is installed and available in PATH. Original error: spawn ENOENT'
+      );
+    });
+
+    it('should reject on positive exit code', () => {
+      childMock.on.mockReset();
+      childMock.on.mockImplementation((name, cb) => {
+        if (name === 'close') {
+          cb(1);
+        }
+      });
+      return expect(Utils.spawnProcess('cmd', [])).rejects.toThrow(Utils.SpawnError);
+    });
+
+    it('should reject with signal on process termination', () => {
+      childMock.on.mockReset();
+      childMock.on.mockImplementation((name, cb) => {
+        if (name === 'close') {
+          cb(null, 'SIGTERM');
+        }
+      });
+      return expect(Utils.spawnProcess('cmd', [])).rejects.toThrow('cmd failed after receiving signal SIGTERM');
+    });
+
+    it('should allow omitted args', () => {
+      childMock.stdout.on.mockReset();
+      childMock.stderr.on.mockReset();
+      childMock.on.mockReset();
+      childMock.on.mockImplementation((name, cb) => {
+        if (name === 'close') {
+          cb(0);
+        }
+      });
+
+      return expect(Utils.spawnProcess('cmd'))
+        .resolves.toEqual({ stderr: '', stdout: '' })
+        .then(() => {
+          expect(childProcess.spawn).toHaveBeenCalledWith(
+            'cmd',
+            [],
+            expect.objectContaining({
+              shell: expect.any(Boolean)
+            })
+          );
+          return null;
+        });
+    });
+  });
+
+  describe('safeJsonParse', () => {
+    it('should parse valid JSON', () => {
+      expect(Utils.safeJsonParse('{"foo": "bar"}')).toEqual({ foo: 'bar' });
+    });
+
+    it('should return null for invalid JSON', () => {
+      expect(Utils.safeJsonParse('{"foo":')).toEqual(null);
+    });
+  });
+
+  describe('splitLines', () => {
+    it('should split on new line characters', () => {
+      expect(Utils.splitLines('a\r\nb\nc')).toEqual(['a', 'b', 'c']);
+    });
+  });
+
+  describe('getAllNodeFunctions', () => {
+    it('should return all functions with node runtime', () => {
+      const mockServerless = {
+        service: {
+          getAllFunctions: jest.fn(() => ['foo', 'bar', 'baz']),
+          getFunction: jest.fn(name => {
+            if (name === 'foo') {
+              return { runtime: 'nodejs20.x' };
+            }
+            if (name === 'bar') {
+              return { runtime: 'nodejs22.x' };
+            }
+            if (name === 'baz') {
+              return { runtime: 'python3.6' };
+            }
+          })
+        }
+      };
+
+      expect(Utils.getAllNodeFunctions.call({ serverless: mockServerless })).toEqual(['foo', 'bar']);
+    });
+
+    it('should ignore handlers with image.uri property', () => {
+      const mockServerless = {
+        service: {
+          getAllFunctions: jest.fn(() => ['foo', 'bar']),
+          getFunction: jest.fn(name => {
+            if (name === 'foo') {
+              return { runtime: 'nodejs20.x' };
+            }
+            if (name === 'bar') {
+              return { runtime: 'nodejs22.x', image: { uri: 'fake-image-uri' } };
+            }
+          })
+        }
+      };
+
+      expect(Utils.getAllNodeFunctions.call({ serverless: mockServerless })).toEqual(['foo']);
+    });
+
+    it('should ignore handlers with image.name property', () => {
+      const mockServerless = {
+        service: {
+          getAllFunctions: jest.fn(() => ['foo', 'bar']),
+          getFunction: jest.fn(name => {
+            if (name === 'foo') {
+              return { runtime: 'nodejs20.x' };
+            }
+            if (name === 'bar') {
+              return { runtime: 'nodejs22.x', image: { name: 'fake-image-name' } };
+            }
+          })
+        }
+      };
+
+      expect(Utils.getAllNodeFunctions.call({ serverless: mockServerless })).toEqual(['foo']);
+    });
+
+    it('should not ignore handlers with image.name property if defined as ecr image', () => {
+      const mockServerless = {
+        service: {
+          getAllFunctions: jest.fn(() => ['foo', 'bar']),
+          getFunction: jest.fn(name => {
+            if (name === 'foo') {
+              return { runtime: 'nodejs20.x' };
+            }
+            if (name === 'bar') {
+              return { runtime: 'nodejs22.x', image: { name: 'fake-image-name' } };
+            }
+          }),
+          provider: {
+            ecr: {
+              images: {
+                'fake-image-name': {
+                  path: './'
+                }
+              }
+            }
+          }
+        }
+      };
+
+      expect(Utils.getAllNodeFunctions.call({ serverless: mockServerless })).toEqual(['foo', 'bar']);
+    });
+  });
+
+  describe('isProviderGoogle', () => {
+    describe('when the provider is set to "google"', () => {
+      const mockServerless = {
+        service: {
+          provider: {
+            name: 'google'
+          }
+        }
+      };
+
+      it('should return true', () => {
+        expect(Utils.isProviderGoogle(mockServerless)).toBe(true);
+      });
+    });
+
+    describe('when the provider is set to "aws"', () => {
+      const mockServerless = {
+        service: {
+          provider: {
+            name: 'aws'
+          }
+        }
+      };
+
+      it('should return false', () => {
+        expect(Utils.isProviderGoogle(mockServerless)).toBe(false);
+      });
+    });
+  });
+});
